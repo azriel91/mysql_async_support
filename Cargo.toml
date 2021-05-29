@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["Azriel Hoh <azriel91@gmail.com>"]
 description = "Run arbitrary SQL queries on a MySql database through SSH."
 edition = "2018"
+repository = "https://github.com/azriel91/mysql_async_support"
+documentation = "https://docs.rs/mysql_async_support"
+readme = "README.md"
+keywords = ["mysql", "ssh", "async"]
+license = "MIT OR Apache-2.0"
 
 [workspace]
 members = ["crate/*"]
