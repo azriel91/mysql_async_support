@@ -2,7 +2,7 @@
 name = "mysql_async_support"
 version = "0.1.0"
 authors = ["Azriel Hoh <azriel91@gmail.com>"]
-description = "Supporting types for interacting with mysql databases."
+description = "Run arbitrary SQL queries on a MySql database through SSH."
 edition = "2018"
 
 [workspace]

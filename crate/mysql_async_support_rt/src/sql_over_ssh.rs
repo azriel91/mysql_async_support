@@ -34,7 +34,7 @@ impl SqlOverSsh {
         jump_host_address: HostAddress<'f>,
         jump_host_auth_params: JumpHostAuthParams<'f>,
         db_address: HostAddress<'f>,
-        db_schema_cred: &'f DbSchemaCred<'f>,
+        db_schema_cred: DbSchemaCred<'f>,
         queries: Queries,
     ) -> Result<<Queries as FnWithPool<'_>>::Output, <Queries as FnWithPool<'_>>::Error>
     where
@@ -72,7 +72,7 @@ impl SqlOverSsh {
         jump_host_address: HostAddress<'f>,
         jump_host_auth_params: JumpHostAuthParams<'f>,
         db_address: HostAddress<'f>,
-        db_schema_cred: &'f DbSchemaCred<'f>,
+        db_schema_cred: DbSchemaCred<'f>,
     ) -> Result<mysql_async::Pool, Error> {
         let local_socket_addr = {
             let target_socket = HostSocketParams {
