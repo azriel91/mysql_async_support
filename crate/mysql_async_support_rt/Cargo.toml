@@ -1,0 +1,12 @@
+[package]
+name = "mysql_async_support_rt"
+version = "0.1.0"
+authors = ["Azriel Hoh <azriel91@gmail.com>"]
+description = "Supporting types for interacting with mysql databases."
+edition = "2018"
+
+[dependencies]
+futures = "0.3.15"
+mysql_async = "0.27.1"
+mysql_async_support_model = { version = "0.1.0", path = "../mysql_async_support_model" }
+ssh_jumper = "0.1.1"

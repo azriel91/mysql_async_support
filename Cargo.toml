@@ -1,0 +1,13 @@
+[package]
+name = "mysql_async_support"
+version = "0.1.0"
+authors = ["Azriel Hoh <azriel91@gmail.com>"]
+description = "Supporting types for interacting with mysql databases."
+edition = "2018"
+
+[workspace]
+members = ["crate/*"]
+
+[dependencies]
+mysql_async_support_model = { version = "0.1.0", path = "crate/mysql_async_support_model" }
+mysql_async_support_rt = { version = "0.1.0", path = "crate/mysql_async_support_rt" }

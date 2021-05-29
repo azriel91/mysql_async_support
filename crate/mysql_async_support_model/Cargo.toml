@@ -1,0 +1,12 @@
+[package]
+name = "mysql_async_support_model"
+version = "0.1.0"
+authors = ["Azriel Hoh <azriel91@gmail.com>"]
+description = "Supporting types for interacting with mysql databases."
+edition = "2018"
+
+[dependencies]
+indexmap = { version = "1.6.2", features = ["serde-1"] }
+mysql_async = "0.27.1"
+serde = { version = "1.0.126", features = ["derive"] }
+ssh_jumper = "0.1.1"
