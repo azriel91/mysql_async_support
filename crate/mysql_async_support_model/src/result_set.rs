@@ -1,13 +1,19 @@
 use serde::{Deserialize, Serialize};
 
-use crate::StringValues;
-
 /// Message, warning count, and result values for a single statement.
 ///
-/// This is used for arbitrary queries received as input, so we convert all
-/// values to [`String`]s.
+/// See [`ResultSetStrings`] and [`ResultSetTyped`] for aliased versions of this
+/// class.
+///
+/// # Type Parameters
+///
+/// * `T`: Type that represents the values from each row. This may be either
+///   [`StringValues`] or [`TypedValues`].
+///
+/// [`StringValues`]: crate::StringValues
+/// [`TypedValues`]: crate::TypedValues
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ResultSet {
+pub struct ResultSet<T> {
     /// Number of rows affected by the query.
     pub affected_rows: u64,
     /// Number of warnings.
@@ -15,5 +21,5 @@ pub struct ResultSet {
     /// Message returned by the server.
     pub info: String,
     /// Values returned by the statement.
-    pub values: Vec<StringValues>,
+    pub values: Vec<T>,
 }
