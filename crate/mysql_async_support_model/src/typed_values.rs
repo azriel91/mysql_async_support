@@ -10,6 +10,21 @@ use serde::{Deserialize, Serialize};
 use crate::Value;
 
 /// Represents a query result row, with all values stringified.
+///
+/// # Note
+///
+/// * You must use prepared statements if you want types to be returned,
+///   otherwise it is always returned as `Value::Bytes`
+/// * There must be only one statement in the query -- i.e. no multiple selects.
+/// * Not sure if nested select statements work.
+///
+/// However, I haven't managed to get MySQL to return `Value`s with proper
+/// return types.
+///
+/// See:
+///
+/// * <https://github.com/go-sql-driver/mysql/issues/407#issuecomment-172583652>
+/// * <https://dev.mysql.com/doc/refman/8.0/en/sql-prepared-statements.html>
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct TypedValues(pub IndexMap<String, Value>);
 
