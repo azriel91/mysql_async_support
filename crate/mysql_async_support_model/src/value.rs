@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{Duration, NaiveDate, NaiveDateTime};
 use mysql_async::{
     prelude::{ConvIr, FromValue},
@@ -22,9 +24,12 @@ use serde::{Deserialize, Serialize};
 /// * <https://github.com/go-sql-driver/mysql/issues/407#issuecomment-172583652>
 /// * <https://dev.mysql.com/doc/refman/8.0/en/sql-prepared-statements.html>
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
 pub enum Value {
     /// Value was `NULL` in the database.
     None,
+    Bool(bool),
+    String(String),
     Bytes(Vec<u8>),
     Int(i64),
     UInt(u64),
@@ -75,7 +80,44 @@ impl From<MySqlValue> for Value {
     fn from(value: MySqlValue) -> Self {
         match value {
             MySqlValue::NULL => Value::None,
-            MySqlValue::Bytes(bytes) => Value::Bytes(bytes),
+            MySqlValue::Bytes(bytes) => {
+                // The following column types are all mapped to Value::Bytes in `mysql_common`
+                // `0.26.0` and `0.27.0`.
+                //
+                // See <https://github.com/blackbeam/rust_mysql_common/blob/v0.27.0/src/value/mod.rs#L398-L416>.
+                //
+                // ```rust,ignore
+                // ColumnType::MYSQL_TYPE_STRING
+                // ColumnType::MYSQL_TYPE_VAR_STRING
+                // ColumnType::MYSQL_TYPE_BLOB
+                // ColumnType::MYSQL_TYPE_TINY_BLOB
+                // ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                // ColumnType::MYSQL_TYPE_LONG_BLOB
+                // ColumnType::MYSQL_TYPE_SET
+                // ColumnType::MYSQL_TYPE_ENUM
+                // ColumnType::MYSQL_TYPE_DECIMAL
+                // ColumnType::MYSQL_TYPE_VARCHAR
+                // ColumnType::MYSQL_TYPE_BIT
+                // ColumnType::MYSQL_TYPE_NEWDECIMAL
+                // ColumnType::MYSQL_TYPE_GEOMETRY
+                // ColumnType::MYSQL_TYPE_JSON
+                // ```
+                //
+                // We take a naive approach and try to convert the byte array into a string, and
+                // then parse it, because MySQL sends ASCII characters.
+
+                match String::from_utf8(bytes) {
+                    Ok(value_string) => {
+                        let value_str = value_string.as_str();
+                        bool::from_str(value_str)
+                            .map(Value::Bool)
+                            .or_else(|_| i64::from_str(value_str).map(Value::Int))
+                            .or_else(|_| f64::from_str(value_str).map(Value::Double))
+                            .unwrap_or_else(|_| Value::String(value_string))
+                    }
+                    Err(e) => Value::Bytes(e.into_bytes()),
+                }
+            }
             MySqlValue::Int(v) => Value::Int(v),
             MySqlValue::UInt(v) => Value::UInt(v),
             MySqlValue::Float(v) => Value::Float(v),
