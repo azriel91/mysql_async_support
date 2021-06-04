@@ -314,7 +314,7 @@ mod tests {
         let value = Value::Time(duration);
 
         assert_eq!(
-            String::from(r#"{"Time":{"secs":123,"nanos":456}}"#),
+            String::from(r#"{"secs":123,"nanos":456}"#),
             serde_json::to_string(&value).expect("Failed to serialize `Value::Time`.")
         );
     }
@@ -325,7 +325,7 @@ mod tests {
         let value = Value::Time(-duration);
 
         assert_eq!(
-            String::from(r#"{"Time":{"secs":-123,"nanos":-456}}"#),
+            String::from(r#"{"secs":-123,"nanos":-456}"#),
             serde_json::to_string(&value).expect("Failed to serialize `Value::Time`.")
         );
     }
@@ -337,7 +337,7 @@ mod tests {
 
         assert_eq!(
             value,
-            serde_json::from_str(r#"{"Time":{"secs":123,"nanos":456}}"#)
+            serde_json::from_str(r#"{"secs":123,"nanos":456}"#)
                 .expect("Failed to deserialize `Value::Time`")
         );
     }
@@ -348,7 +348,7 @@ mod tests {
         let value = Value::Time(-duration);
         assert_eq!(
             value,
-            serde_json::from_str(r#"{"Time":{"secs":-123,"nanos":-456}}"#)
+            serde_json::from_str(r#"{"secs":-123,"nanos":-456}"#)
                 .expect("Failed to deserialize `Value::Time`")
         );
     }
