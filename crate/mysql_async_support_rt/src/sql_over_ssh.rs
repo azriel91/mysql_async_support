@@ -7,7 +7,7 @@ use ssh_jumper::{
 
 use crate::FnWithPool;
 
-/// Runs SQL over an SSH connection..
+/// Runs SQL over an SSH connection.
 #[derive(Clone)]
 pub struct SqlOverSsh;
 
