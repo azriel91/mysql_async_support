@@ -22,6 +22,8 @@ pub enum Error {
     QueryResultSetFetch(mysql_async::Error),
     /// Error occurred while disconnecting connection pool.
     MySqlPoolDisconnect(mysql_async::Error),
+    /// SSH connection initialization failed.
+    SshConnInit,
     /// SSH tunnel was not found for a query target.
     SshTunnelNotFound {
         /// Address of the jump host.
@@ -46,6 +48,7 @@ impl fmt::Display for Error {
             Self::MySqlPoolDisconnect(..) => {
                 write!(f, "Failed to cleanly disconnect MySQL connection pool.")
             }
+            Self::SshConnInit => write!(f, "SSH connection initialization failed."),
             Self::SshTunnelNotFound {
                 jump_host_address,
                 query_target,
@@ -70,6 +73,7 @@ impl std::error::Error for Error {
             Self::MySqlExecute(error) => Some(error),
             Self::QueryResultSetFetch(error) => Some(error),
             Self::MySqlPoolDisconnect(error) => Some(error),
+            Self::SshConnInit => None,
             Self::SshTunnelNotFound { .. } => None,
             Self::SshJumper(error) => error.source(),
         }
