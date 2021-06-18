@@ -226,8 +226,7 @@ impl QueryRunner {
                             error,
                         }
                     })?;
-                let result = self
-                    .sql_over_ssh
+                self.sql_over_ssh
                     .exec(
                         db_tunnel,
                         query_target.db_schema_cred.clone(),
@@ -240,15 +239,7 @@ impl QueryRunner {
                     .map_err(|error| QueryError {
                         name: query_target.name.to_string(),
                         error,
-                    });
-
-                eprintln!(
-                    "{}: {}",
-                    query_target.name,
-                    if result.is_ok() { "Ok!" } else { "Err" }
-                );
-
-                result
+                    })
             })
             .buffered(self.tunnels_per_ssh_connection)
             .fold(
