@@ -1,5 +1,9 @@
 use std::fmt;
 
+use ssh_jumper::model::HostAddress;
+
+use crate::QueryTarget;
+
 /// Error while using the `mysql_async_support` library.
 #[derive(Debug)]
 pub enum Error {
@@ -18,6 +22,13 @@ pub enum Error {
     QueryResultSetFetch(mysql_async::Error),
     /// Error occurred while disconnecting connection pool.
     MySqlPoolDisconnect(mysql_async::Error),
+    /// SSH tunnel was not found for a query target.
+    SshTunnelNotFound {
+        /// Address of the jump host.
+        jump_host_address: HostAddress<'static>,
+        /// The query target that the SSH tunnel wasn't found for.
+        query_target: QueryTarget<'static>,
+    },
     /// Error while using the `ssh_jumper` crate.
     SshJumper(Box<ssh_jumper::model::Error>),
 }
@@ -35,6 +46,16 @@ impl fmt::Display for Error {
             Self::MySqlPoolDisconnect(..) => {
                 write!(f, "Failed to cleanly disconnect MySQL connection pool.")
             }
+            Self::SshTunnelNotFound {
+                jump_host_address,
+                query_target,
+            } => write!(
+                f,
+                "Expected SSH tunnel for `{query_target}: {db_address}` to be established through jump host: `{jump_host}`. This is likely a bug.",
+                query_target = query_target.name,
+                db_address = query_target.db_address,
+                jump_host = jump_host_address
+            ),
             Self::SshJumper(error) => error.fmt(f),
         }
     }
@@ -49,6 +70,7 @@ impl std::error::Error for Error {
             Self::MySqlExecute(error) => Some(error),
             Self::QueryResultSetFetch(error) => Some(error),
             Self::MySqlPoolDisconnect(error) => Some(error),
+            Self::SshTunnelNotFound { .. } => None,
             Self::SshJumper(error) => error.source(),
         }
     }

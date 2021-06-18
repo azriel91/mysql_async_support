@@ -1,66 +1,197 @@
-use futures::stream::{self, StreamExt};
-use mysql_async::{prelude::Queryable, BinaryProtocol};
-use mysql_async_support_model::{
-    Error, QueryError, QueryResult, QueryTarget, ResultSetTyped, TypedValues,
-};
-use ssh_jumper::model::{HostAddress, JumpHostAuthParams};
+use std::{collections::HashMap, net::SocketAddr};
 
-use crate::SqlOverSsh;
+use futures::stream::{self, StreamExt, TryStreamExt};
+use mysql_async::{
+    prelude::{FromRow, Queryable},
+    BinaryProtocol,
+};
+use mysql_async_support_model::{Error, QueryError, QueryResult, QueryTarget, ResultSet};
+use ssh_jumper::{
+    model::{HostAddress, HostSocketParams, JumpHostAuthParams, SshTunnelParams},
+    SshJumper, SshSession,
+};
+
+use crate::{FnWithPool, SqlOverSsh, SshTunnelManager};
 
 /// Runs queries for one or more query targets.
+#[derive(Clone)]
 pub struct QueryRunner {
     /// Runs SQL over an SSH connection.
     pub sql_over_ssh: SqlOverSsh,
     /// Maximum number of SSH connections to run concurrently.
     pub ssh_concurrent_limit: usize,
+    /// Maximum number of tunnels per SSH connection.
+    pub tunnels_per_ssh_connection: usize,
 }
 
 impl QueryRunner {
+    /// Maximum number of tunnels per SSH connection.
+    pub const SSH_CONCURRENT_LIMIT_DEFAULT: usize = 5;
+    /// Maximum number of tunnels per SSH connection.
+    pub const TUNNELS_PER_SSH_CONNECTION_DEFAULT: usize = 5;
+
+    /// Returns a new `QueryRunner` with the given connection limits.
+    pub fn new(ssh_concurrent_limit: usize, tunnels_per_ssh_connection: usize) -> Self {
+        Self {
+            sql_over_ssh: SqlOverSsh,
+            ssh_concurrent_limit,
+            tunnels_per_ssh_connection,
+        }
+    }
+
+    /// Queries a database over an SSH connection.
+    pub async fn query<T>(
+        &self,
+        jump_host_address: &HostAddress<'_>,
+        jump_host_auth_params: &JumpHostAuthParams<'_>,
+        query_target: &QueryTarget<'_>,
+        sql_text: &str,
+    ) -> Result<QueryResult<T>, Error>
+    where
+        T: FromRow + Send + 'static,
+    {
+        let db_tunnel = {
+            let jump_host_address = jump_host_address.clone();
+            let jump_host_auth_params = jump_host_auth_params.clone();
+            let target_socket = HostSocketParams {
+                address: query_target.db_address.clone(),
+                port: 3306,
+            };
+            let ssh_params =
+                SshTunnelParams::new(jump_host_address, jump_host_auth_params, target_socket);
+            SshJumper::open_tunnel(&ssh_params).await?
+        };
+
+        self.sql_over_ssh
+            .exec(
+                db_tunnel,
+                query_target.db_schema_cred.clone(),
+                |pool: mysql_async::Pool| async {
+                    let result = Self::query_run(&pool, query_target, sql_text).await;
+                    (pool, result)
+                },
+            )
+            .await
+    }
+
     /// Queries multiple query targets with the same query.
-    pub async fn query_multi(
+    pub async fn query_multi<T>(
         &self,
         jump_host_address: &HostAddress<'_>,
         jump_host_auth_params: &JumpHostAuthParams<'_>,
         query_targets: &[QueryTarget<'_>],
         sql_text: &str,
-    ) -> Result<(Vec<QueryResult>, Vec<QueryError>), Error> {
+    ) -> Result<(Vec<QueryResult<T>>, Vec<QueryError>), Error>
+    where
+        T: FromRow + Send + 'static,
+    {
+        let (_ssh_sessions, qt_name_to_tunnel) = self
+            .ssh_tunnels_init(jump_host_address, jump_host_auth_params, query_targets)
+            .await?;
+
+        let query_results_and_errors = self
+            .query_over_tunnels(
+                jump_host_address,
+                query_targets,
+                sql_text,
+                qt_name_to_tunnel,
+            )
+            .await;
+
+        Ok(query_results_and_errors)
+    }
+
+    /// Queries multiple query targets with the same query.
+    pub async fn exec_multi<'f, Queries>(
+        &'f self,
+        jump_host_address: HostAddress<'f>,
+        jump_host_auth_params: JumpHostAuthParams<'f>,
+        query_targets: &'f [QueryTarget<'f>],
+        queries: Queries,
+    ) -> Result<
+        (
+            Vec<(&'f QueryTarget<'f>, <Queries as FnWithPool<'f>>::Output)>,
+            Vec<(&'f QueryTarget<'f>, <Queries as FnWithPool<'f>>::Error)>,
+        ),
+        Error,
+    >
+    where
+        Queries: FnWithPool<'f> + Copy,
+        <Queries as FnWithPool<'f>>::Error: From<Error>,
+    {
+        let (_ssh_sessions, qt_name_to_tunnel) = self
+            .ssh_tunnels_init(&jump_host_address, &jump_host_auth_params, query_targets)
+            .await
+            .map_err(Error::from)?;
+
+        let query_results_and_errors = self
+            .exec_over_tunnels(jump_host_address, query_targets, queries, qt_name_to_tunnel)
+            .await?;
+
+        Ok(query_results_and_errors)
+    }
+
+    /// Establishes SSH sessions and tunnels.
+    async fn ssh_tunnels_init<'qt>(
+        &self,
+        jump_host_address: &HostAddress<'_>,
+        jump_host_auth_params: &JumpHostAuthParams<'_>,
+        query_targets: &'qt [QueryTarget<'_>],
+    ) -> Result<(Vec<SshSession>, HashMap<&'qt str, SocketAddr>), Error> {
+        stream::iter(query_targets.chunks(self.tunnels_per_ssh_connection))
+            .then(|query_targets_chunk| {
+                SshTunnelManager::prepare_tunnels(
+                    jump_host_address,
+                    jump_host_auth_params,
+                    query_targets_chunk,
+                )
+            })
+            .try_fold(
+                (
+                    Vec::with_capacity(query_targets.len() / self.tunnels_per_ssh_connection + 1),
+                    HashMap::with_capacity(query_targets.len() * 4 / 3),
+                ),
+                |(mut ssh_sessions, mut db_tunnels), (ssh_session, db_tunnels_chunk)| async move {
+                    ssh_sessions.push(ssh_session);
+                    db_tunnels.extend(db_tunnels_chunk);
+
+                    Ok((ssh_sessions, db_tunnels))
+                },
+            )
+            .await
+    }
+
+    async fn query_over_tunnels<T>(
+        &self,
+        jump_host_address: &HostAddress<'_>,
+        query_targets: &[QueryTarget<'_>],
+        sql_text: &str,
+        qt_name_to_tunnel: HashMap<&str, SocketAddr>,
+    ) -> (Vec<QueryResult<T>>, Vec<QueryError>)
+    where
+        T: FromRow + Send + 'static,
+    {
+        let qt_name_to_tunnel = &qt_name_to_tunnel;
         let query_results_and_errors = stream::iter(query_targets.iter())
             .map(|query_target| async move {
+                let db_tunnel = *qt_name_to_tunnel
+                    .get(query_target.name.as_ref())
+                    .ok_or_else(|| {
+                        let error = Error::SshTunnelNotFound {
+                            jump_host_address: jump_host_address.into_static(),
+                            query_target: query_target.clone().into_static(),
+                        };
+                        QueryError {
+                            name: query_target.name.to_string(),
+                            error,
+                        }
+                    })?;
                 self.sql_over_ssh
-                    .execute(
-                        jump_host_address.clone(),
-                        jump_host_auth_params.clone(),
-                        query_target.db_address.clone(),
+                    .exec(
+                        db_tunnel,
                         query_target.db_schema_cred.clone(),
                         |pool: mysql_async::Pool| async {
-                            let result = match pool.get_conn().await {
-                                Ok(mut conn) => {
-                                    let statement =
-                                        conn.prep(sql_text).await.map_err(Error::MySqlPrepare);
-                                    match statement {
-                                        Ok(statement) => {
-                                            let result = conn
-                                                .exec_iter(statement, ())
-                                                .await
-                                                .map_err(Error::MySqlExecute);
-
-                                            match result {
-                                                Ok(mut query_result) => {
-                                                    Self::query_result_fetch(
-                                                        query_target.name.to_string(),
-                                                        &mut query_result,
-                                                    )
-                                                    .await
-                                                }
-                                                Err(e) => Err(e),
-                                            }
-                                        }
-                                        Err(e) => Err(e),
-                                    }
-                                }
-                                Err(e) => Err(Error::MySqlConnectionRetrieve(e)),
-                            };
-
+                            let result = Self::query_run(&pool, query_target, sql_text).await;
                             (pool, result)
                         },
                     )
@@ -73,25 +204,62 @@ impl QueryRunner {
             .buffered(self.ssh_concurrent_limit)
             .fold(
                 (Vec::new(), Vec::new()),
-                |(mut website_query_results, mut website_query_errors), result| async {
+                |(mut query_results, mut query_errors), result| async {
                     match result {
-                        Ok(website_query_result) => {
-                            website_query_results.push(website_query_result)
-                        }
-                        Err(website_query_error) => website_query_errors.push(website_query_error),
+                        Ok(query_result) => query_results.push(query_result),
+                        Err(query_error) => query_errors.push(query_error),
                     }
-                    (website_query_results, website_query_errors)
+                    (query_results, query_errors)
                 },
             )
             .await;
 
-        Ok(query_results_and_errors)
+        query_results_and_errors
     }
 
-    async fn query_result_fetch(
+    async fn query_run<T>(
+        pool: &mysql_async::Pool,
+        query_target: &QueryTarget<'_>,
+        sql_text: &str,
+    ) -> Result<QueryResult<T>, Error>
+    where
+        T: FromRow + Send + 'static,
+    {
+        match pool.get_conn().await {
+            Ok(mut conn) => {
+                let statement = conn.prep(sql_text).await.map_err(Error::MySqlPrepare);
+                match statement {
+                    Ok(statement) => {
+                        let result = conn
+                            .exec_iter(statement, ())
+                            .await
+                            .map_err(Error::MySqlExecute);
+
+                        match result {
+                            Ok(mut query_result) => {
+                                Self::query_result_fetch::<T>(
+                                    query_target.name.to_string(),
+                                    &mut query_result,
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(Error::MySqlConnectionRetrieve(e)),
+        }
+    }
+
+    async fn query_result_fetch<T>(
         query_target_name: String,
         query_result: &mut mysql_async::QueryResult<'_, '_, BinaryProtocol>,
-    ) -> Result<QueryResult, Error> {
+    ) -> Result<QueryResult<T>, Error>
+    where
+        T: FromRow + Send + 'static,
+    {
         // A query result may have multiple result sets.
         // Each set may have a different number of columns.
         //
@@ -101,14 +269,14 @@ impl QueryRunner {
         let mut result_sets = Vec::new();
         while !query_result.is_empty() {
             let values = query_result
-                .collect::<TypedValues>()
+                .collect::<T>()
                 .await
                 .map_err(Error::QueryResultSetFetch)?;
             let affected_rows = query_result.affected_rows();
             let warning_count = query_result.warnings();
             let info = query_result.info().into_owned();
 
-            let result_set = ResultSetTyped {
+            let result_set = ResultSet::<T> {
                 affected_rows,
                 info,
                 warning_count,
@@ -121,5 +289,65 @@ impl QueryRunner {
             name: query_target_name,
             result_sets,
         })
+    }
+
+    async fn exec_over_tunnels<'f, Queries>(
+        &'f self,
+        jump_host_address: HostAddress<'f>,
+        query_targets: &'f [QueryTarget<'f>],
+        queries: Queries,
+        qt_name_to_tunnel: HashMap<&'f str, SocketAddr>,
+    ) -> Result<
+        (
+            Vec<(&'f QueryTarget<'f>, <Queries as FnWithPool<'f>>::Output)>,
+            Vec<(&'f QueryTarget<'f>, <Queries as FnWithPool<'f>>::Error)>,
+        ),
+        Error,
+    >
+    where
+        Queries: FnWithPool<'f> + Copy,
+        <Queries as FnWithPool<'f>>::Error: From<Error>,
+    {
+        let qt_name_to_tunnel = &qt_name_to_tunnel;
+        let jump_host_address = &jump_host_address;
+        let exec_results_and_errors = stream::iter(query_targets.iter())
+            .map(|query_target| async move {
+                let db_tunnel = *qt_name_to_tunnel
+                    .get(query_target.name.as_ref())
+                    .ok_or_else(|| Error::SshTunnelNotFound {
+                        jump_host_address: jump_host_address.clone().into_static(),
+                        query_target: query_target.clone().into_static(),
+                    })
+                    .map_err(<Queries as FnWithPool<'f>>::Error::from)
+                    .map_err(|exec_error| (query_target, exec_error))?;
+
+                self.sql_over_ssh
+                    .exec(db_tunnel, query_target.db_schema_cred.clone(), queries)
+                    .await
+                    .map(|exec_result| (query_target, exec_result))
+                    .map_err(|exec_error| (query_target, exec_error))
+            })
+            .buffered(self.ssh_concurrent_limit)
+            .fold(
+                (Vec::new(), Vec::new()),
+                |(mut exec_results, mut exec_errors), result| async {
+                    match result {
+                        Ok(exec_result) => exec_results.push(exec_result),
+                        Err(exec_error) => exec_errors.push(exec_error),
+                    }
+                    (exec_results, exec_errors)
+                },
+            )
+            .await;
+        Ok(exec_results_and_errors)
+    }
+}
+
+impl Default for QueryRunner {
+    fn default() -> Self {
+        Self::new(
+            Self::SSH_CONCURRENT_LIMIT_DEFAULT,
+            Self::TUNNELS_PER_SSH_CONNECTION_DEFAULT,
+        )
     }
 }
