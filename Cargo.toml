@@ -1,6 +1,6 @@
 [package]
 name = "mysql_async_support"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Azriel Hoh <azriel91@gmail.com>"]
 description = "Run arbitrary SQL queries on a MySql database through SSH."
 edition = "2018"
