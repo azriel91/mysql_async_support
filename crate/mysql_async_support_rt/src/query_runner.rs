@@ -26,9 +26,9 @@ pub struct QueryRunner {
 
 impl QueryRunner {
     /// Maximum number of tunnels per SSH connection.
-    pub const SSH_CONCURRENT_LIMIT_DEFAULT: usize = 5;
+    pub const SSH_CONCURRENT_LIMIT_DEFAULT: usize = 20;
     /// Maximum number of tunnels per SSH connection.
-    pub const TUNNELS_PER_SSH_CONNECTION_DEFAULT: usize = 5;
+    pub const TUNNELS_PER_SSH_CONNECTION_DEFAULT: usize = 3;
 
     /// Returns a new `QueryRunner` with the given connection limits.
     pub fn new(ssh_concurrent_limit: usize, tunnels_per_ssh_connection: usize) -> Self {
@@ -94,29 +94,32 @@ impl QueryRunner {
                 )
                 .await;
 
-                match ssh_connections {
-                    Ok((_ssh_sessions, qt_name_to_tunnel)) => {
-                        self.query_over_tunnels(
-                            jump_host_address,
-                            query_targets_chunk,
-                            sql_text,
-                            qt_name_to_tunnel,
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        let mut error = Some(e);
-                        let errors = query_targets_chunk
-                            .iter()
-                            .map(|query_target| QueryError {
-                                name: query_target.name.clone().into_owned(),
-                                error: error.take().unwrap_or(Error::SshConnInit),
-                            })
-                            .collect::<Vec<QueryError>>();
-                        (vec![], errors)
+                async move {
+                    match ssh_connections {
+                        Ok((_ssh_sessions, qt_name_to_tunnel)) => {
+                            self.query_over_tunnels(
+                                jump_host_address,
+                                query_targets_chunk,
+                                sql_text,
+                                qt_name_to_tunnel,
+                            )
+                            .await
+                        }
+                        Err(e) => {
+                            let mut error = Some(e);
+                            let errors = query_targets_chunk
+                                .iter()
+                                .map(|query_target| QueryError {
+                                    name: query_target.name.clone().into_owned(),
+                                    error: error.take().unwrap_or(Error::SshConnInit),
+                                })
+                                .collect::<Vec<QueryError>>();
+                            (vec![], errors)
+                        }
                     }
                 }
             })
+            .buffered(self.ssh_concurrent_limit)
             .fold(
                 (
                     Vec::with_capacity(query_targets.len()),
@@ -159,26 +162,29 @@ impl QueryRunner {
                 )
                 .await;
 
-                match ssh_connections {
-                    Ok((_ssh_sessions, qt_name_to_tunnel)) => {
-                        self
-                            .exec_over_tunnels(jump_host_address, query_targets, queries, qt_name_to_tunnel)
-                            .await
-                    }
-                    Err(e) => {
-                        let mut error = Some(e);
-                        let errors = query_targets_chunk
-                            .iter()
-                            .map(|query_target| {
+                async move {
+                    match ssh_connections {
+                        Ok((_ssh_sessions, qt_name_to_tunnel)) => {
+                            self
+                                .exec_over_tunnels(jump_host_address, query_targets, queries, qt_name_to_tunnel)
+                                .await
+                        }
+                        Err(e) => {
+                            let mut error = Some(e);
+                            let errors = query_targets_chunk
+                                .iter()
+                                .map(|query_target| {
 
-                                let error = error.take().unwrap_or(Error::SshConnInit);
-                                (query_target, <Queries as FnWithPool<'f>>::Error::from(error))
-                            })
-                            .collect::<Vec<(&QueryTarget<'_>, <Queries as FnWithPool<'f>>::Error)>>();
-                        (vec![], errors)
+                                    let error = error.take().unwrap_or(Error::SshConnInit);
+                                    (query_target, <Queries as FnWithPool<'f>>::Error::from(error))
+                                })
+                                .collect::<Vec<(&QueryTarget<'_>, <Queries as FnWithPool<'f>>::Error)>>();
+                            (vec![], errors)
+                        }
                     }
                 }
             })
+            .buffered(self.ssh_concurrent_limit)
             .fold(
                 (
                     Vec::with_capacity(query_targets.len()),
@@ -220,7 +226,8 @@ impl QueryRunner {
                             error,
                         }
                     })?;
-                self.sql_over_ssh
+                let result = self
+                    .sql_over_ssh
                     .exec(
                         db_tunnel,
                         query_target.db_schema_cred.clone(),
@@ -233,9 +240,17 @@ impl QueryRunner {
                     .map_err(|error| QueryError {
                         name: query_target.name.to_string(),
                         error,
-                    })
+                    });
+
+                eprintln!(
+                    "{}: {}",
+                    query_target.name,
+                    if result.is_ok() { "Ok!" } else { "Err" }
+                );
+
+                result
             })
-            .buffered(self.ssh_concurrent_limit)
+            .buffered(self.tunnels_per_ssh_connection)
             .fold(
                 (Vec::new(), Vec::new()),
                 |(mut query_results, mut query_errors), result| async {
@@ -357,7 +372,7 @@ impl QueryRunner {
                     .map(|exec_result| (query_target, exec_result))
                     .map_err(|exec_error| (query_target, exec_error))
             })
-            .buffered(self.ssh_concurrent_limit)
+            .buffered(self.tunnels_per_ssh_connection)
             .fold(
                 (Vec::new(), Vec::new()),
                 |(mut exec_results, mut exec_errors), result| async {
