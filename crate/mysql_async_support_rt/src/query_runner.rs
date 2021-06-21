@@ -1,11 +1,11 @@
-use std::{collections::HashMap, net::SocketAddr};
-
 use futures::stream::{self, StreamExt};
 use mysql_async::{
     prelude::{FromRow, Queryable},
     BinaryProtocol,
 };
-use mysql_async_support_model::{Error, QueryError, QueryResult, QueryTarget, ResultSet};
+use mysql_async_support_model::{
+    Error, QueryError, QueryResult, QueryTarget, ResultSet, SshTunnelMap,
+};
 use ssh_jumper::{
     model::{HostAddress, HostSocketParams, JumpHostAuthParams, SshTunnelParams},
     SshJumper,
@@ -86,36 +86,34 @@ impl QueryRunner {
         T: FromRow + Send + 'static,
     {
         stream::iter(query_targets.chunks(self.tunnels_per_ssh_connection))
-            .then(|query_targets_chunk| async move {
-                let ssh_connections = SshTunnelManager::prepare_tunnels(
+            .map(|query_targets_chunk| async move {
+                let ssh_tunnel_map = SshTunnelManager::prepare_tunnels(
                     jump_host_address,
                     jump_host_auth_params,
                     query_targets_chunk,
                 )
                 .await;
 
-                async move {
-                    match ssh_connections {
-                        Ok((_ssh_sessions, qt_name_to_tunnel)) => {
-                            self.query_over_tunnels(
-                                jump_host_address,
-                                query_targets_chunk,
-                                sql_text,
-                                qt_name_to_tunnel,
-                            )
-                            .await
-                        }
-                        Err(e) => {
-                            let mut error = Some(e);
-                            let errors = query_targets_chunk
-                                .iter()
-                                .map(|query_target| QueryError {
-                                    name: query_target.name.clone().into_owned(),
-                                    error: error.take().unwrap_or(Error::SshConnInit),
-                                })
-                                .collect::<Vec<QueryError>>();
-                            (vec![], errors)
-                        }
+                match ssh_tunnel_map {
+                    Ok(ssh_tunnel_map) => {
+                        self.query_over_tunnels(
+                            jump_host_address,
+                            query_targets_chunk,
+                            sql_text,
+                            ssh_tunnel_map,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        let mut error = Some(e);
+                        let errors = query_targets_chunk
+                            .iter()
+                            .map(|query_target| QueryError {
+                                name: query_target.name.clone().into_owned(),
+                                error: error.take().unwrap_or(Error::SshConnInit),
+                            })
+                            .collect::<Vec<QueryError>>();
+                        (vec![], errors)
                     }
                 }
             })
@@ -154,33 +152,31 @@ impl QueryRunner {
         let jump_host_address = &jump_host_address;
         let jump_host_auth_params = &jump_host_auth_params;
         stream::iter(query_targets.chunks(self.tunnels_per_ssh_connection))
-            .then(|query_targets_chunk| async move {
-                let ssh_connections = SshTunnelManager::prepare_tunnels(
+            .map(|query_targets_chunk| async move {
+                let ssh_tunnel_map = SshTunnelManager::prepare_tunnels(
                     jump_host_address,
                     jump_host_auth_params,
                     query_targets_chunk,
                 )
                 .await;
 
-                async move {
-                    match ssh_connections {
-                        Ok((_ssh_sessions, qt_name_to_tunnel)) => {
-                            self
-                                .exec_over_tunnels(jump_host_address, query_targets, queries, qt_name_to_tunnel)
-                                .await
-                        }
-                        Err(e) => {
-                            let mut error = Some(e);
-                            let errors = query_targets_chunk
-                                .iter()
-                                .map(|query_target| {
+                match ssh_tunnel_map {
+                    Ok(ssh_tunnel_map) => {
+                        self
+                            .exec_over_tunnels(jump_host_address, query_targets, queries, ssh_tunnel_map)
+                            .await
+                    }
+                    Err(e) => {
+                        let mut error = Some(e);
+                        let errors = query_targets_chunk
+                            .iter()
+                            .map(|query_target| {
 
-                                    let error = error.take().unwrap_or(Error::SshConnInit);
-                                    (query_target, <Queries as FnWithPool<'f>>::Error::from(error))
-                                })
-                                .collect::<Vec<(&QueryTarget<'_>, <Queries as FnWithPool<'f>>::Error)>>();
-                            (vec![], errors)
-                        }
+                                let error = error.take().unwrap_or(Error::SshConnInit);
+                                (query_target, <Queries as FnWithPool<'f>>::Error::from(error))
+                            })
+                            .collect::<Vec<(&QueryTarget<'_>, <Queries as FnWithPool<'f>>::Error)>>();
+                        (vec![], errors)
                     }
                 }
             })
@@ -206,12 +202,12 @@ impl QueryRunner {
         jump_host_address: &HostAddress<'_>,
         query_targets: &[QueryTarget<'_>],
         sql_text: &str,
-        qt_name_to_tunnel: HashMap<&str, SocketAddr>,
+        ssh_tunnel_map: SshTunnelMap<'_>,
     ) -> (Vec<QueryResult<T>>, Vec<QueryError>)
     where
         T: FromRow + Send + 'static,
     {
-        let qt_name_to_tunnel = &qt_name_to_tunnel;
+        let qt_name_to_tunnel = &ssh_tunnel_map.qt_name_to_tunnel;
         let query_results_and_errors = stream::iter(query_targets.iter())
             .map(|query_target| async move {
                 let db_tunnel = *qt_name_to_tunnel
@@ -336,7 +332,7 @@ impl QueryRunner {
         jump_host_address: &HostAddress<'f>,
         query_targets: &'f [QueryTarget<'f>],
         queries: Queries,
-        qt_name_to_tunnel: HashMap<&'f str, SocketAddr>,
+        ssh_tunnel_map: SshTunnelMap<'f>,
     ) -> (
         Vec<(&'f QueryTarget<'f>, <Queries as FnWithPool<'f>>::Output)>,
         Vec<(&'f QueryTarget<'f>, <Queries as FnWithPool<'f>>::Error)>,
@@ -345,7 +341,7 @@ impl QueryRunner {
         Queries: FnWithPool<'f> + Copy,
         <Queries as FnWithPool<'f>>::Error: From<Error>,
     {
-        let qt_name_to_tunnel = &qt_name_to_tunnel;
+        let qt_name_to_tunnel = &ssh_tunnel_map.qt_name_to_tunnel;
         stream::iter(query_targets.iter())
             .map(|query_target| async move {
                 let db_tunnel = *qt_name_to_tunnel
