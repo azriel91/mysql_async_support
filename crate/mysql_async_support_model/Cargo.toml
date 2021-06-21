@@ -1,6 +1,6 @@
 [package]
 name = "mysql_async_support_model"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["Azriel Hoh <azriel91@gmail.com>"]
 description = "Supporting types for interacting with mysql databases."
 edition = "2018"
