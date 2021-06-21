@@ -4,10 +4,10 @@ use std::{
 };
 
 use futures::{stream, StreamExt, TryStreamExt};
-use mysql_async_support_model::{Error, QueryTarget};
+use mysql_async_support_model::{Error, QueryTarget, SshTunnelMap};
 use ssh_jumper::{
     model::{HostAddress, HostSocketParams, JumpHostAuthParams},
-    SshJumper, SshSession,
+    SshJumper,
 };
 
 /// Opens SSH sessions and creates tunnels for query targets.
@@ -28,11 +28,11 @@ impl SshTunnelManager {
     /// targets per tunnel, perhaps by calling [`chunks`].
     ///
     /// [`chunks`]: std::slice::chunks
-    pub async fn prepare_tunnels<'query_target>(
+    pub async fn prepare_tunnels<'qt>(
         jump_host_addr: &HostAddress<'_>,
         jump_host_auth_params: &JumpHostAuthParams<'_>,
-        query_targets: &'query_target [QueryTarget<'query_target>],
-    ) -> Result<(SshSession, HashMap<&'query_target str, SocketAddr>), Error> {
+        query_targets: &'qt [QueryTarget<'qt>],
+    ) -> Result<SshTunnelMap<'qt>, Error> {
         let ssh_session =
             SshJumper::open_ssh_session(jump_host_addr, jump_host_auth_params).await?;
         let ssh_session_ref = &ssh_session;
@@ -65,6 +65,11 @@ impl SshTunnelManager {
             )
             .await?;
 
-        Ok((ssh_session, qt_name_to_tunnel))
+        let ssh_tunnel_map = SshTunnelMap {
+            ssh_session,
+            qt_name_to_tunnel,
+        };
+
+        Ok(ssh_tunnel_map)
     }
 }
